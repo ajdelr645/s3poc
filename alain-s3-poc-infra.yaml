@@ -1,0 +1,595 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description:  AWS Cloudformation template to create infrastructure
+#Parameters Section
+Parameters:
+  ReplicationBucketName:
+    Description: "Please the replication bucket in secondary region S3 bucket name without the Environment appended to it."
+    Type: String
+    Default: "alain-s3-repbuck-366443085567"
+  OriginalBucketName:
+    Description: "Please input Original primary  S3 bucket name"
+    Type: String
+    Default: "alain-s3-origbuck-366443085567"
+
+  TopicName:
+    Description: "Please input Friendly SNS topic name "
+    Type: String
+    Default: "alain-sns-366443085567"
+  EmailList:
+    Description: "Please enter EmailList eg:bob@gmail.com,michael@gmail.com where you want to receive SNS Notifications" 
+    Type: String 
+    Default: xmusjacksonf337@gmail.com
+
+#Group will be created as part of the template
+#Users can upload/download the objects 
+  IAMS3AccessGroup:
+    Description: "Please enter Group Name to give IAM users added to this group Permissions to the Bucket" 
+    Type: String
+    Default: "s3-poc-users-group"
+
+  IAMUserList:
+    Description: 'Please enter IAM users with , separated values without space in between eg: bob,michael'
+    Type: String
+    Default: "commonapi"
+
+  Environment:
+    Description: 'Please enter environment variable to append to each resource eg: dev, prod, staging, uat etc'
+    Type: String
+    Default: "dev"
+
+  CloudTrailName:
+    Description: 'Please enter CloudTrail name for Data and Management api calls'
+    Type: String
+    Default: "s3-poc-cloudtrial-366443085567"
+
+  S3BucketForLambdaCode:
+    Description: 'Please enter S3 Bucket Name where you want to save your Lambda Code'
+    Type: String
+    Default: "alain-lambdas-366443085567"
+
+  s3CRRKmsKeyArn:
+    Description: 'Please enter Key Arn from the secondary CRR stack'
+    Type: String
+   
+   
+
+#Resources Section
+
+Resources:
+#SNS Topic
+  Topic:
+    Type: 'AWS::SNS::Topic'
+    Properties:
+      TopicName: !Sub ${TopicName}-${Environment}
+
+
+
+#KMS Encryption for Primary S3 Bucket
+  s3Key:
+    Type: AWS::KMS::Key
+    Properties:
+      KeyPolicy:
+        Version: 2012-10-17
+        Id: !Join ["-", ['key-s3', !Ref Environment]]
+        Statement:
+          - Sid: Enable root to administer the keys
+            Effect: Allow
+            Principal:
+              AWS: !Join
+                - ''
+                - - 'arn:aws:iam::'
+                  - !Ref 'AWS::AccountId'
+                  - ':root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: "*"
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: Log the key action in cloudwatch
+            Effect: Allow
+            Principal:
+              Service:
+                - delivery.logs.amazonaws.com
+            Action: 'kms:GenerateDataKey*'
+            Resource: '*'
+  s3KeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Join ["-", ['alias/s3', !Ref Environment]]
+      TargetKeyId: !Ref s3Key
+
+
+  LambdaExecutionRole:
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          -
+            Action:
+              - "sts:AssumeRole"
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+        Version: "2012-10-17"
+      Path: /
+      Policies:
+        -
+          PolicyDocument:
+            Statement:
+              -
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Effect: Allow
+                Resource: "arn:aws:logs:*:*:*"
+              -
+                Action:
+                  - "s3:*"
+                  - "sns:*"
+                Effect: Allow
+                Resource: "*"
+            Version: "2012-10-17"
+          PolicyName: root
+    Type: "AWS::IAM::Role"
+
+  LambdaSNSExecutionRole:
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          -
+            Action:
+              - "sts:AssumeRole"
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+        Version: "2012-10-17"
+      Path: /
+      Policies:
+        -
+          PolicyDocument:
+            Statement:
+              -
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Effect: Allow
+                Resource: "arn:aws:logs:*:*:*"
+              -
+                Action:
+                  - "s3:*"
+                  - "sns:*"
+                Effect: Allow
+                Resource: "*"
+            Version: "2012-10-17"
+          PolicyName: root
+    Type: "AWS::IAM::Role"
+
+# Give role permissions to S3 to trigger lambda function
+  Lambdas3Permission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !GetAtt LambdaSNSS3Events.Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref 'AWS::AccountId'
+      SourceArn: !Sub 'arn:aws:s3:::${OriginalBucketName}-${Environment}'
+    
+
+# Primary Bucket to store files with all features described in task enabled 
+  OriginalBucket:
+    DependsOn:
+      - s3Key
+      - Lambdas3Permission
+    Properties: 
+      LoggingConfiguration:
+        DestinationBucketName: !Ref LoggingBucket
+        LogFilePrefix: s3-access-logs
+      BucketEncryption:
+          ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              KMSMasterKeyID: !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:${s3KeyAlias}'
+              SSEAlgorithm: 'aws:kms'
+      NotificationConfiguration:
+        # TopicConfigurations:
+        #   - Topic: !Ref TopicArn
+        #     Event: 's3:ObjectRemoved:*'
+        LambdaConfigurations:
+          - Function: !GetAtt LambdaSNSS3Events.Arn 
+            Event: 's3:ObjectRemoved:*'
+        # QueueConfigurations:
+        #   - Queue: !GetAtt MyQueue.Arn 
+        #     Event: 's3:ObjectRemoved:*'
+      BucketName: !Sub ${OriginalBucketName}-${Environment}
+      LifecycleConfiguration:
+        Rules:
+          - Id: GlacierRule
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: GLACIER
+      ReplicationConfiguration:
+        Role: !GetAtt S3Role.Arn
+        Rules:
+          -
+            Destination:
+              Bucket:
+                !Join
+                  - ""
+                  -
+                    - "arn:aws:s3:::"
+                    - !Sub ${ReplicationBucketName}-${Environment}
+              EncryptionConfiguration: 
+                ReplicaKmsKeyID: !Ref s3CRRKmsKeyArn
+              StorageClass: STANDARD
+            Id: CRRReplicationRule
+            SourceSelectionCriteria: 
+              SseKmsEncryptedObjects:
+                Status: Enabled
+            Prefix: ""
+            Status: Enabled
+      VersioningConfiguration:
+        Status: Enabled
+    Type: "AWS::S3::Bucket" 
+  LoggingBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      AccessControl: LogDeliveryWrite
+
+
+
+ #Custom Lambda for multiple sns subscriptions
+  CustomLambdaMultipleSNSSubscriptions: 
+    Properties:
+      Code:  
+        ZipFile: |
+          var aws = require('aws-sdk');
+          var response = require('cfn-response');
+
+          exports.handler = function(event, context, callback){
+                console.log("event is ", event);
+                var sns = new aws.SNS();
+            if (event.RequestType == 'Create' || event.RequestType == 'Update'){
+                var emailList = event.ResourceProperties.EmailList.split(',');
+
+                emailList.forEach(email => {
+                var snsParams = {
+                  Protocol: 'EMAIL', 
+                  TopicArn: event.ResourceProperties.TopicArn,
+                  Endpoint: email
+                };
+              
+                sns.subscribe(snsParams, function(err, data) {
+                  if (err){
+                    console.log(err, err.stack)
+                    response.send(event, context, response.FAILED, err)
+                  }
+                  else {
+                  
+                    response.send(event, context, response.SUCCESS, {}, event.Email);
+                    callback(null,'SNS Subscription sent');
+                  }
+                  });
+                });      
+            } else if (event.RequestType == 'Delete'){
+              console.log('Please delete the ' + event.PhysicalResourceId + ' Subscription.');
+              response.send(event, context, response.SUCCESS, {}, event);
+              callback(null);
+            }
+          };     
+         
+            
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: nodejs12.x
+      Timeout: 30
+    Type: "AWS::Lambda::Function"
+  TriggerLambdaSNS:
+    Type: Custom::LambdaTrigSNS
+    Properties:
+      ServiceToken: !GetAtt CustomLambdaMultipleSNSSubscriptions.Arn
+      EmailList: !Ref EmailList
+      TopicArn: !Ref Topic
+  
+  LambdaSNSS3Events:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Environment:
+        Variables:
+          TopicArn: !Ref Topic
+      Handler: lambdasns.handler
+      Role: !GetAtt LambdaSNSExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref S3BucketForLambdaCode
+        S3Key: "lambdasns.zip"
+
+        #TO LOAD LAMBDA CODE FROM S3 FIRST A BUCKET NEED TO BE CREATED AND LOADED WITH LAMBDASNS.ZIP AND CUSTOMLAMBDA.ZIP INTO OR ELSE BELOW CAN BE UNCOMMENTED TO LOAD FUCTION CODE DIRECTLY  AND COMMENT ABOVE TWO LINES
+        # ZipFile: |
+            # import socket
+            # import ssl, boto3
+            # import re, sys, os, datetime
+
+
+            # def sns_Alert(BucketName, Object, Region, Identity):
+            #     Message = "Hi Admin, an object "+ Object +  ' has been deleted by ' + Identity + ' belonging to the bucket ' + BucketName  + ' in Region ' + Region + ' Please take action Immediately.'
+            #     Subject = "S3 Bucket Object Delete Notification for S3 Bucket=" + BucketName 
+              
+            #     response = client.publish(
+            #         TargetArn=os.environ['TopicArn'],
+            #         Message=Message,
+            #         Subject=Subject
+            #     )
+
+
+            # #####Main Section
+            # client = boto3.client('sns')
+
+
+            # def lambda_handler(event, context):
+            #     BucketName = event['Records'][0]['s3']['bucket']['name']
+            #     Object = event['Records'][0]['s3']['object']['key']
+            #     Region =  event['Records'][0]['awsRegion']
+            #     Identity =  event['Records'][0]['userIdentity']['principalId']
+                
+            #     #print("Event is", BucketName, Object, Region, Identity)
+            #     sns_Alert(BucketName, Object, Region, Identity )
+
+      Runtime: nodejs12.x
+    
+
+#Enable encryption for both S3-SSE and KMS . Please delete the one you dont require
+  BucketPolicy:
+      Type: 'AWS::S3::BucketPolicy'
+      Properties:
+        Bucket: !Ref OriginalBucket
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+           # - 
+            #   Sid: "DenyIncorrectEncryptionHeaderS3SSE"
+            #   Effect: "Deny"
+            #   Principal: "*"
+            #   Action: "s3:PutObject"
+            #   Resource:
+            #     !Sub |-
+            #       arn:aws:s3:::${OriginalBucket}/*
+            #   Condition: 
+            #     StringEquals:
+            #       s3:x-amz-server-side-encryption: "AES256"
+            # - 
+            #   Sid: "DenyUnEncryptedObjectUploadswithoutS3SSE"
+            #   Effect: "Deny"
+            #   Principal: "*"
+            #   Action: "s3:PutObject"
+            #   Resource:
+            #     !Sub |-
+            #       arn:aws:s3:::${OriginalBucket}/*
+            #   Condition: 
+            #     "Null":
+            #       s3:x-amz-server-side-encryption: true
+            - 
+              Sid: "DenyIncorrectEncryptionHeaderwithoutkms"
+              Effect: "Deny"
+              Principal: "*"
+              Action: "s3:PutObject"
+              Resource:
+                !Sub |-
+                  arn:aws:s3:::${OriginalBucket}/*
+              Condition: 
+                StringNotEquals:
+                  s3:x-amz-server-side-encryption: "aws:kms"
+            - 
+              Sid: "DenyUnEncryptedObjectUploadswithoutkms"
+              Effect: "Deny"
+              Principal: "*"
+              Action: "s3:PutObject"
+              Resource:
+                !Sub |-
+                  arn:aws:s3:::${OriginalBucket}/*
+              Condition: 
+                "Null":
+                  s3:x-amz-server-side-encryption: true 
+            # - 
+            #   Sid: "IAM User Access only"
+            #   Effect: "Allow"
+            #   Principal: "*"  
+            #   Action: "s3:List*"
+            #   Resource: !Sub ${OriginalBucket.Arn}
+            # - 
+            #   Sid: "IAM User Access only"
+            #   Effect: "Allow"
+            #   Principal: "*"  
+            #   Action: "s3:*"
+            #   Resource:
+            #     !Sub |-
+            #       arn:aws:s3:::${OriginalBucketName}-${Environment}/* 
+
+# A new log group for writing Cloud Trail 
+  LogGroup: 
+    Type: AWS::Logs::LogGroup 
+    Properties:
+      RetentionInDays: 365 # optional
+
+# A role for your trail
+  CloudTrailLogsRole: 
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action: sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service: cloudtrail.amazonaws.com
+        Version: '2012-10-17'
+
+# The policy for for cloudTrail Role
+  CloudTrailLogsPolicy: 
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+        - Action:
+          - logs:PutLogEvents
+          - logs:CreateLogStream
+          Effect: Allow
+          Resource:
+            Fn::GetAtt:
+            - LogGroup
+            - Arn
+        Version: '2012-10-17'
+      PolicyName: DefaultPolicy
+      Roles:
+      - Ref: CloudTrailLogsRole
+
+
+# The Trail for logging Management and Data  Events
+  CloudTrail: 
+    Type: AWS::CloudTrail::Trail  
+    Properties:
+      TrailName: !Sub ${CloudTrailName}-${Environment}
+      EventSelectors: [{DataResources: [{Type: 'AWS::S3::Object', Values: ['arn:aws:s3:::']}], IncludeManagementEvents: true, ReadWriteType: All}]
+            
+      IsLogging: true
+      S3BucketName: !Ref LoggingBucket
+      CloudWatchLogsLogGroupArn:
+        Fn::GetAtt:
+        - LogGroup
+        - Arn
+      CloudWatchLogsRoleArn:
+        Fn::GetAtt:
+        - CloudTrailLogsRole
+        - Arn
+    DependsOn:
+    - CloudTrailLogsPolicy
+    - CloudTrailLogsRole
+
+#Write CloudTrail logs to S3 bucket
+  CloudTrailBucketPolicy: 
+    Type: AWS::S3::BucketPolicy
+    Properties: 
+      Bucket: 
+        Ref: LoggingBucket
+      PolicyDocument: 
+        Version: "2012-10-17"
+        Statement: 
+          - 
+            Sid: "AWSCloudTrailAclCheck"
+            Effect: "Allow"
+            Principal: 
+              Service: "cloudtrail.amazonaws.com"
+            Action: "s3:GetBucketAcl"
+            Resource: 
+              !Sub |-
+                arn:aws:s3:::${LoggingBucket}
+          - 
+            Sid: "AWSCloudTrailWrite"
+            Effect: "Allow"
+            Principal: 
+              Service: "cloudtrail.amazonaws.com"
+            Action: "s3:PutObject"
+            Resource:
+              !Sub |-
+                arn:aws:s3:::${LoggingBucket}/AWSLogs/${AWS::AccountId}/*
+            Condition: 
+              StringEquals:
+                s3:x-amz-acl: "bucket-owner-full-control"
+
+#S3 role for Origin bucket to replicate to the CRR region     
+  S3Role: 
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          -
+            Action: "sts:AssumeRole"
+            Effect: Allow
+            Principal:
+              Service:
+                - s3.amazonaws.com
+        Version: "2012-10-17"
+      ManagedPolicyArns:
+        -  arn:aws:iam::aws:policy/AmazonS3FullAccess
+      Policies:
+        -
+          PolicyDocument:
+            Statement:
+              -
+                Action:
+                  - "kms:*"
+                Effect: Allow
+                Resource: "*"
+             
+          PolicyName: root
+      Path: /
+    Type: "AWS::IAM::Role"
+
+#IAM Group to give access to S3
+  IAMS3AccessGroupResource:
+    DependsOn:  
+      - OriginalBucket
+    Type: AWS::IAM::Group
+    Properties: 
+      GroupName: !Ref IAMS3AccessGroup 
+      Policies:
+        - PolicyName: myapppolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+                - s3:GetBucketLocation
+                - s3:ListAllMyBuckets
+                - kms:* 
+              Resource: "*"
+            - Effect: Allow
+              Action:
+                - s3:List*
+                - kms:*
+              Resource: !Sub ${OriginalBucket.Arn}
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - kms:*
+                - s3:PutObject
+                - s3:PutObjectAcl
+              Resource: !Sub ${OriginalBucket.Arn}/*
+
+#add IAM user to Group to have S3 Access
+  addUserToGroup:
+    DependsOn: 
+      - IAMS3AccessGroupResource
+    Type: AWS::IAM::UserToGroupAddition
+    Properties:
+      GroupName: !Ref IAMS3AccessGroup
+      Users: !Split [",", !Ref IAMUserList]
+
+# Use the ouput of SNS ARN in Lambda to send Notifications
+Outputs:
+  SNSTopicARN:
+    Description: 'The ARN of the alert topic.'
+    Value: !Ref Topic
+  CWLogGroup:
+    Description: 'Cloudwatch Loggroup where the cloudtrail logs are written.'
+    Value: !Ref LogGroup
+
+  OriginalBucket:
+    Description: 'Primary Original bucket in primary region.'
+    Value: !Ref OriginalBucket
+  
+  
+  IamS3Group:
+    Description: 'IAM S3 Access Group'
+    Value: !Ref IAMS3AccessGroupResource 
+  CloudTrail:
+    Description: 'CouldTrail for Data and management Events'
+    Value: !Ref CloudTrail
+
+  S3KmsKey:
+    Description: 'KMS key used by S3 for kms encryption'
+    Value: !Ref s3Key
+ 
+ 

@@ -1,0 +1,68 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  Environment:
+    Description: >-
+      Please enter environment variable to append to each resource eg: dev,
+      prod, staging, uat etc
+    Type: String
+    Default: dev
+  ReplicationBucketName:
+    Description: Please the replication bucket in secondary region S3 bucket name
+    Type: String
+    Default: "alain-s3-repbuck-366443085567"
+Resources:
+  s3CRRKey:
+    Type: AWS::KMS::Key
+    Properties:
+      KeyPolicy:
+        Version: 2012-10-17
+        Id: !Join ["-", ['key-s3', !Ref Environment]]
+        Statement:
+          - Sid: Enable root to administer the keys
+            Effect: Allow
+            Principal:
+              AWS: !Join
+                - ''
+                - - 'arn:aws:iam::'
+                  - !Ref 'AWS::AccountId'
+                  - ':root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: "*"
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: Log the key action in cloudwatch
+            Effect: Allow
+            Principal:
+              Service:
+                - delivery.logs.amazonaws.com
+            Action: 'kms:GenerateDataKey*'
+            Resource: '*'
+    
+  s3CRRKeyAlias:
+    Type: 'AWS::KMS::Alias'
+    Properties:
+      AliasName: !Join 
+        - '-'
+        - - alias/s3CRR
+          - !Ref Environment
+      TargetKeyId: !Ref s3CRRKey
+  ReplicationBucket:
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              KMSMasterKeyID: !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:${s3CRRKeyAlias}'
+              SSEAlgorithm: 'aws:kms'
+      BucketName: !Sub ${ReplicationBucketName}-${Environment}
+      VersioningConfiguration:
+        Status: Enabled
+    Type: 'AWS::S3::Bucket'
+Outputs:
+  KmsKey:
+    Description: "KMS key for secondary bucket"
+    Value: !GetAtt s3CRRKey.Arn
+
